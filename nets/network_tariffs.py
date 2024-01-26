@@ -1,6 +1,7 @@
 from typing import Union
 import pandas as pd
 import pyomo.environ as pm
+from pyomo.opt import SolverStatus, TerminationCondition
 
 from consumer_model import add_consumer_model
 
@@ -13,15 +14,17 @@ def run_model(
         add_bess: bool,
         suppliers_costs: Union[pd.Series, float],
         feedin_tariff: float,
-        energy_component: float = 0,
+        energy_component: Union[pd.Series, float] = 0,
         capacity_load_component: float = 0,
         capacity_feedin_component: float = 0,
         free_capacity: float = 0,
         solver: str = "gurobi",
         **kwargs: dict
-):
+) -> object:
     if type(suppliers_costs) is float:
         suppliers_costs = pd.Series(index=load_ts.index, data=suppliers_costs)
+    if type(energy_component) is float:
+        energy_component = pd.Series(index=load_ts.index, data=energy_component)
     model = setup_model(
         load_ts=load_ts,
         add_ev=add_ev,
@@ -36,11 +39,24 @@ def run_model(
         free_capacity=free_capacity,
         **kwargs
     )
-    results = optimise_model(model, load_ts.index, solver=solver)
-    results["load"] = load_ts
+    results_ts, results_scalar = optimise_model(model, load_ts.index, solver=solver)
+    # add cost values and objective
+    results_ts["load"] = load_ts
+    results_scalar["objective"] = pm.value(model.objective)
+    results_scalar["energy_purchased"] = results_ts["effective_load"].sum()
+    results_scalar["costs_energy_purchase"] = \
+        results_ts["effective_load"].multiply(suppliers_costs).sum()
+    results_scalar["costs_energy_tariff"] = \
+        results_ts["effective_load"].multiply(energy_component).sum()
+    results_scalar["costs_capacity_load_tariff"] = \
+        results_ts["effective_load"].max() * capacity_load_component
     if add_pv:
-        results["pv_orig"] = kwargs.get("gen_ts")
-    return results
+        results_ts["pv_orig"] = kwargs.get("gen_ts")
+        results_scalar["energy_sold"] = results_ts["effective_feedin"].sum()
+        results_scalar["revenues"] = results_scalar["energy_sold"] * feedin_tariff
+        results_scalar["costs_capacity_feedin_tariff"] = \
+            results_ts["effective_feedin"].max() * capacity_feedin_component
+    return results_ts, results_scalar
 
 
 def setup_model(
@@ -51,7 +67,7 @@ def setup_model(
         add_bess: bool,
         suppliers_costs: pd.Series,
         feedin_tariff: float,
-        energy_component: float = 0,
+        energy_component: Union[pd.Series, float] = 0,
         capacity_load_component: float = 0,
         capacity_feedin_component: float = 0,
         free_capacity: float = 0,
@@ -67,6 +83,8 @@ def setup_model(
         add_bess=add_bess,
         **kwargs
     )
+    if type(energy_component) is float:
+        energy_component = pd.Series(index=load_ts.index, data=energy_component)
     model = add_network_tariff_model(
         model=model,
         suppliers_costs=suppliers_costs,
@@ -108,7 +126,7 @@ def add_network_tariff_model(model: pm.ConcreteModel,
                              suppliers_costs: pd.Series,
                              feedin_tariff: float,
                              energy_component: float = 0,
-                             capacity_load_component: float = 0,
+                             capacity_load_component: Union[pd.Series, float] = 0,
                              capacity_feedin_component: float = 0,
                              free_capacity: float = 0):
     def peak_load(m, t):
@@ -117,8 +135,16 @@ def add_network_tariff_model(model: pm.ConcreteModel,
     def peak_feedin(m, t):
         return m.peak_feedin >= m.effective_feedin[t]
     # set network tariff price components
-    for tariff_component in ["energy_component", "capacity_load_component",
-                             "capacity_feedin_component"]:
+    if type(energy_component) is float:
+        energy_component = pd.Series(index=suppliers_costs.index, data=energy_component)
+    model.has_energy_component = (energy_component > 0).any()
+    if model.has_energy_component:
+        model.energy_component = pm.Param(
+            model.time_set,
+            initialize={i: energy_component[model.timeindex[i]] for i in model.time_set},
+            mutable=True,
+        )
+    for tariff_component in ["capacity_load_component", "capacity_feedin_component"]:
         # determine whether tariff component should be accounted for (>0)
         setattr(model, f"has_{tariff_component}", locals()[tariff_component] > 0)
         # add tariff component to model if relevant
@@ -146,7 +172,7 @@ def add_network_tariff_model(model: pm.ConcreteModel,
             model.time_set,
             rule=peak_load
         )
-    if model.has_capacity_feedin_component:
+    if model.has_capacity_feedin_component and model.has_pv:
         model.peak_feedin = pm.Var(
             bounds=(free_capacity, None)
         )
@@ -178,13 +204,14 @@ def minimize_total_consumer_costs(model):
     else:
         revenues = 0
     energy_based_costs = \
-        [(model.suppliers_costs[t] + model.energy_component) * model.effective_load[t]
-         if model.has_energy_component else
+        [(model.suppliers_costs[t] + model.energy_component[t]) *
+         model.effective_load[t] if model.has_energy_component else
          model.suppliers_costs[t] * model.effective_load[t]
          for t in model.time_set]
     capacity_based_costs = \
         [getattr(model, f"capacity_{typ}_component")*getattr(model, f"peak_{typ}")
-         if getattr(model, f"has_capacity_{typ}_component") else 0
+         if getattr(model, f"has_capacity_{typ}_component") and
+            hasattr(model, f"peak_{typ}") else 0
          for typ in ["load", "feedin"]]
     return sum(energy_based_costs) + sum(capacity_based_costs) - revenues + penalty_ev
 
@@ -195,37 +222,44 @@ def optimise_model(
         solver: str = "gurobi",
 ):
     opt = pm.SolverFactory(solver)
-    opt.solve(model, tee=True)
+    opt.options['DualReductions'] = 0
+    opt.options["InfUnbdInfo"] = 1
+    results = opt.solve(model, tee=True)
 
-    result = pd.DataFrame(index=timesteps)
-    # inflexible load
-    result['effective_load'] = pd.Series(model.effective_load.extract_values()).values
-    if model.has_capacity_load_component:
-        result["peak_load"] = model.peak_load.value
-    # PV
-    if model.has_pv:
-        result['effective_feedin'] = \
-            pd.Series(model.effective_feedin.extract_values()).values
-        result["pv_feedin"] = pd.Series(model.pv.extract_values()).values
-        if model.has_capacity_feedin_component:
-            result["peak_feedin"] = model.peak_feedin.value
-    # BESS
-    if model.has_bess:
-        result["charging_bess"] = pd.Series(model.charging_bess.extract_values()).values
-        result["soe_bess"] = pd.Series(model.soe_bess.extract_values()).values
-    # EVs
-    if model.has_ev:
-        result["charging_ev"] = pd.Series(model.charging_ev.extract_values()).values
-        result["energy_level_ev"] = \
-            pd.Series(model.energy_level_ev.extract_values()).values
-        result["penalty_ev"] = pd.Series(model.penalty_ev.extract_values()).values
-    # HPs
-    if model.has_hp:
-        result["charging_hp"] = pd.Series(model.charging_hp.extract_values()).values
-        result["charging_tes"] = pd.Series(model.charging_tes.extract_values()).values
-        result["energy_level_tes"] = \
-            pd.Series(model.energy_level_tes.extract_values()).values
-    if pm.value(model.objective) < 0:
+    if (results.solver.status == SolverStatus.ok) and \
+            (results.solver.termination_condition == TerminationCondition.optimal):
+        result_ts = pd.DataFrame(index=timesteps)
+        result_scalar = pd.Series()
+        # inflexible load
+        result_ts['effective_load'] = pd.Series(model.effective_load.extract_values()).values
+        if model.has_capacity_load_component:
+            result_scalar["peak_load"] = model.peak_load.value
+        # PV
+        if model.has_pv:
+            result_ts['effective_feedin'] = \
+                pd.Series(model.effective_feedin.extract_values()).values
+            result_ts["pv_feedin"] = pd.Series(model.pv.extract_values()).values
+            if model.has_capacity_feedin_component:
+                result_scalar["peak_feedin"] = model.peak_feedin.value
+        # BESS
+        if model.has_bess:
+            result_ts["charging_bess"] = pd.Series(model.charging_bess.extract_values()).values
+            result_ts["soe_bess"] = pd.Series(model.soe_bess.extract_values()).values
+        # EVs
+        if model.has_ev:
+            result_ts["charging_ev"] = pd.Series(model.charging_ev.extract_values()).values
+            result_ts["energy_level_ev"] = \
+                pd.Series(model.energy_level_ev.extract_values()).values
+            result_ts["penalty_ev"] = pd.Series(model.penalty_ev.extract_values()).values
+        # HPs
+        if model.has_hp:
+            result_ts["charging_hp"] = pd.Series(model.charging_hp.extract_values()).values
+            result_ts["charging_tes"] = pd.Series(model.charging_tes.extract_values()).values
+            result_ts["energy_level_tes"] = \
+                pd.Series(model.energy_level_tes.extract_values()).values
+        return result_ts, result_scalar
+    else:
+        print(model.getAttr("ModelSense"))
+        print(model.getAttr("UnbdRay"))
         raise ValueError
-    return result
 
