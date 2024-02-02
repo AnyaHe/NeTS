@@ -28,12 +28,12 @@ def add_consumer_model(model: pm.ConcreteModel,
                 time series of upper bound on cumulative energy consumption of EV
             "ev_lower_energy": pd.Series
                 time series of lower bound on cumulative energy consumption of EV
-            "ev_efficiency": float
+            "ev_efficiency": float (optional)
                 charging efficiency of EV, has to lie between 0 and 1, defaults to 0.9
-            "ev_weight_penalty": float
+            "ev_weight_penalty": float (optional)
                 weight of penalty for deviation from reference charging, later used for
                 objective, defaults to 0.001
-            "ev_squared_penalty": bool
+            "ev_squared_penalty": bool (optional)
                 determines whether penalty for deviation from reference charging is
                 squared or not (then linear), defaults to True (-> squared penalty)
         For HPs:
@@ -45,7 +45,7 @@ def add_consumer_model(model: pm.ConcreteModel,
                 heat demand time series of household
             "hp_cop": pd.Series
                 time series of coefficient of performance of heat pump
-            "hp_fixed_soc_tes": float
+            "hp_fixed_soc_tes": float (optional)
                 relative state of charge that should be obtained at beginning and end
                 of simulation period, has be lie between 0 and 1, defaults to 0.5
         For PV:
@@ -54,9 +54,9 @@ def add_consumer_model(model: pm.ConcreteModel,
         For BESS:
             "bess_capacity": float
                 energy capacity of battery storage in kWh
-            "bess_ratio_power_to_energy": float
+            "bess_ratio_power_to_energy": float (optional)
                 ratio of power to energy capacity in kW/kWh, defaults to 0.6 kW/kWh
-            "bess_fixed_soc": float
+            "bess_fixed_soc": float (optional)
                 relative state of charge that should be obtained at beginning and end
                 of simulation period, has be lie between 0 and 1, defaults to 0.5
     :return:
@@ -88,9 +88,9 @@ def add_consumer_model(model: pm.ConcreteModel,
     if add_ev:
         model = add_ev_model(
             model=model,
-            upper_power=kwargs.get("ev_upper_power"),
-            upper_energy=kwargs.get("ev_upper_energy"),
-            lower_energy=kwargs.get("ev_lower_energy"),
+            upper_power=kwargs["ev_upper_power"],
+            upper_energy=kwargs["ev_upper_energy"],
+            lower_energy=kwargs["ev_lower_energy"],
             efficiency=kwargs.get("ev_efficiency", 0.9),
             weight_penalty=kwargs.get("ev_weight_penalty", 0.001),
             squared_penalty=kwargs.get("ev_squared_penalty", True)
@@ -158,13 +158,14 @@ def add_bess_model(
 
     # Set fix parameters
     model.has_bess = True
-    model.capacity_bess = capacity_bess
-    model.fix_soe_bess = fixed_soc * capacity_bess
+    model.capacity_bess = pm.Param(initialize=capacity_bess, mutable=True)
+    model.fix_soe_bess = pm.Param(initialize=fixed_soc * capacity_bess, mutable=True)
+    model.power_bess = pm.Param(initialize=ratio_power_to_energy * model.capacity_bess,
+                                mutable=True)
     # Set variables
     model.charging_bess = pm.Var(
         model.time_set,
-        bounds=(-ratio_power_to_energy * model.capacity_bess,
-                ratio_power_to_energy * model.capacity_bess)
+        bounds=(-model.power_bess, model.power_bess)
     )
     model.soe_bess = pm.Var(
         model.time_set,
@@ -245,7 +246,7 @@ def add_ev_model(
     model.upper_ev_power = upper_power
     model.upper_ev_energy = upper_energy
     model.lower_ev_energy = lower_energy
-    model.ev_efficiency = efficiency
+    model.ev_efficiency = pm.Param(initialize=efficiency, mutable=True)
     model.weight_pen_ev = weight_penalty
     model.ev_squared_penalty = squared_penalty
     # Set time-varying parameters
@@ -320,9 +321,9 @@ def add_heat_pump_model(
         return m.energy_level_tes[time] == m.soe_fix
     # Set fix parameters
     model.has_hp = True
-    model.p_nom_hp = p_nom_hp
-    model.soe_fix = fixed_soc * capacity_tes
-    model.capacity_tes = capacity_tes
+    model.p_nom_hp = pm.Param(initialize=p_nom_hp, mutable=True)
+    model.soe_fix = pm.Param(initialize=fixed_soc * capacity_tes, mutable=True)
+    model.capacity_tes = pm.Param(initialize=capacity_tes, mutable=True)
     model.heat_demand = heat_demand
     model.cop = cop
     # Set time-dependent parameters
@@ -361,6 +362,97 @@ def add_heat_pump_model(
         model.times_fixed_soc,
         rule=fixed_energy_level_tes
     )
+    return model
+
+
+def update_model_new_household(model,
+                               load_ts,
+                               **kwargs):
+    """
+    Updates model to new household. Note that the type of household should not change,
+    i.e. the same ders should be present as these are currently not checked for.
+
+    :param model: pm.ConcreteModel
+    :param load_ts: pd.Series
+    :param kwargs: dict
+        Contains optional parameters for flexibility options, depending on the modelled
+        options, the following should be included,
+        For EVs:
+            "ev_upper_power": pd.Series
+                time series of maximum charging power for EV
+            "ev_upper_energy": pd.Series
+                time series of upper bound on cumulative energy consumption of EV
+            "ev_lower_energy": pd.Series
+                time series of lower bound on cumulative energy consumption of EV
+            "ev_efficiency": float (optional)
+                charging efficiency of EV, has to lie between 0 and 1, defaults to 0.9
+        For HPs:
+            "hp_p_nom_el": float
+                electrical nominal power of heat pump in kW
+            "hp_capacity_tes": float
+                thermal capacity of thermal energy storage in kWh
+            "hp_heat_demand": pd.Series
+                heat demand time series of household
+            "hp_cop": pd.Series
+                time series of coefficient of performance of heat pump
+            "hp_fixed_soc_tes": float (optional)
+                relative state of charge that should be obtained at beginning and end
+                of simulation period, has be lie between 0 and 1, defaults to 0.5
+        For PV:
+            "gen_ts": pd.Series
+                time series of generation units in households
+        For BESS:
+            "bess_capacity": float
+                energy capacity of battery storage in kWh
+            "bess_ratio_power_to_energy": float (optional)
+                ratio of power to energy capacity in kW/kWh, defaults to 0.6 kW/kWh
+            "bess_fixed_soc": float (optional)
+                relative state of charge that should be obtained at beginning and end
+                of simulation period, has be lie between 0 and 1, defaults to 0.5
+    :return:
+    """
+    # update fix parameters
+    del model.demand_ts
+    model.demand_ts = load_ts
+    if model.has_ev:
+        model.ev_efficiency.set_value(kwargs.get("ev_efficiency", 0.9))
+        del model.upper_ev_power
+        model.upper_ev_power = kwargs["ev_upper_power"]
+        del model.upper_ev_energy
+        model.upper_ev_energy = kwargs["ev_upper_energy"]
+        del model.lower_ev_energy
+        model.lower_ev_energy = kwargs["ev_lower_energy"]
+    if model.has_hp:
+        model.p_nom_hp.set_value(kwargs["hp_p_nom_el"])
+        model.soe_fix.set_value(
+            kwargs.get("hp_fixed_soc_tes", 0.5)*kwargs["hp_capacity_tes"])
+        model.capacity_tes.set_value(kwargs["hp_capacity_tes"])
+        del model.heat_demand
+        model.heat_demand = kwargs["hp_heat_demand"]
+        del model.cop
+        model.cop = kwargs["hp_cop"]
+    if model.has_pv:
+        del model.gen_ts
+        model.gen_ts = kwargs["gen_ts"]
+    if model.has_bess:
+        model.capacity_bess.set_value(kwargs["bess_capacity"])
+        model.fix_soe_bess.set_value(
+            kwargs.get("bess_fixed_soc", 0.5)*kwargs["bess_capacity"])
+        model.power_bess.set_value(
+            kwargs.get("bess_ratio_power_to_energy", 0.6)*kwargs["bess_capacity"])
+
+    # update time-varying parameters
+    for time in model.time_set:
+        model.demand[time].set_value(set_load(model, time))
+        if model.has_ev:
+            model.lower_bound_ev[time].set_value(set_lower_band_ev(model, time))
+            model.upper_bound_ev[time].set_value(set_upper_band_ev(model, time))
+            model.power_bound_ev[time].set_value(set_power_band_ev(model, time))
+        if model.has_hp:
+            model.heat_demand_hp[time].set_value(set_heat_demand(model, time))
+            model.cop_hp[time].set_value(set_cop_hp(model, time))
+        if model.has_pv:
+            model.gen[time].set_value(set_generation(model, time))
     return model
 
 
