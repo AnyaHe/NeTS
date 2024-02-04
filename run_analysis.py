@@ -1,9 +1,16 @@
 import os
 import pandas as pd
 from edisgo.edisgo import import_edisgo_from_files
+from edisgo.opf.timeseries_reduction import get_steps_reinforcement
+import traceback
+
+import logging
+logger = logging.getLogger("pypsa")
+logger.setLevel(logging.ERROR)
 
 from nets.network_tariffs import run_model_multiple_households
 from scenario_setup import tariff_scenarios
+from copy import deepcopy
 
 grid_id = 1056
 feeder_id = 2
@@ -14,7 +21,8 @@ ev_dir = r"C:\Users\aheider\Documents\Grids\{}".format(grid_id)
 prices_dir = \
     r"C:\Users\aheider\Documents\Software\project_Ade\IndustrialDSMFinland\prices.csv"
 res_dir = "results/test_update"
-check_existence = True
+check_existence = False
+calculate_reinforcement = True
 
 # import grid
 edisgo_obj = import_edisgo_from_files(
@@ -131,6 +139,9 @@ def update_edisgo_dfs(der_type, ders_new, ders_ts_new, ders_orig, comps_edisgo,
     names_new_ders = [f"{der_type.upper()}_" + idx for idx in ders_new.index]
     ders_new.index = names_new_ders
     ders_ts_new.columns = names_new_ders
+    # change convention of bess
+    if der_type == "bess":
+        ders_ts_new *= -1
     # if first time object is updated, drop existing elements,
     # otherwise just update frames
     if ders_orig.index.isin(comps_edisgo.index).any():
@@ -143,7 +154,7 @@ def update_edisgo_dfs(der_type, ders_new, ders_ts_new, ders_orig, comps_edisgo,
         comps_ts_edisgo = pd.concat([comps_ts_edisgo, ders_ts_new], axis=1)
     else:
         comps_edisgo.update(ders_new)
-        comps_ts_edisgo.update(comps_ts_edisgo)
+        comps_ts_edisgo.update(ders_ts_new)
     return comps_edisgo, comps_ts_edisgo
 
 
@@ -175,7 +186,7 @@ def update_edisgo_obj(edisgo_obj):
 for tariff, tariff_data in scenarios.items():
     os.makedirs(os.path.join(res_dir, tariff), exist_ok=True)
     if check_existence:
-        if len(os.listdir(os.path.join(res_dir, tariff))) >= 6:
+        if os.path.isfile(os.path.join(res_dir, tariff, "hp_ts.csv")):
             print(f"{tariff} already solved. Skipping.")
             continue
     # initialise objects to update edisgo_obj
@@ -244,9 +255,35 @@ for tariff, tariff_data in scenarios.items():
         results_scalar = pd.concat([results_scalar, results_scalar_tmp])
     # write results back to edisgo_obj
     edisgo_obj = update_edisgo_obj(edisgo_obj)
+    hp_ts_new.to_csv(f"{res_dir}/{tariff}/hp_ts.csv")
+    ev_ts_new.to_csv(f"{res_dir}/{tariff}/ev_ts.csv")
+    pv_ts_new.to_csv(f"{res_dir}/{tariff}/pv_ts.csv")
+    bess_ts_new.to_csv(f"{res_dir}/{tariff}/bess_ts.csv")
     # get reactive power
     edisgo_obj.set_time_series_reactive_power_control()
     edisgo_obj.check_integrity()
     edisgo_obj.save(os.path.join(res_dir, tariff))
     results_scalar.to_csv(os.path.join(res_dir, tariff, f"scalars.csv"))
+    # determine grid issues and grid reinforcement costs
+    if calculate_reinforcement:
+        try:
+            edisgo_tmp = deepcopy(edisgo_obj)
+            edisgo_tmp.analyze()
+            edisgo_tmp.results.to_csv(
+                f"{res_dir}/{tariff}/results_before_reinforcement",
+                parameters={"powerflow_results": ["i_res", "v_res"]})
+            timesteps_reinforcement = get_steps_reinforcement(edisgo_tmp)
+            edisgo_tmp.reinforce(timesteps_pfa=timesteps_reinforcement)
+            edisgo_tmp.analyze()
+            edisgo_tmp.results.to_csv(
+                f"{res_dir}/{tariff}/results_after_reinforcement",
+                parameters={"powerflow_results": ["i_res", "v_res"],
+                            "grid_expansion_results": ["grid_expansion_costs",
+                                                       "unresolved_issues"]})
+            edisgo_tmp.topology.to_csv(
+                f"{res_dir}/{tariff}/topology_after_reinforcement")
+        except:
+            print(f"Something went wrong in grid reinforcement for {grid_id} {tariff}.")
+            traceback.print_exc()
+    print(f"Finished analysis for {tariff}.")
 print("Success")
