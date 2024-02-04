@@ -356,6 +356,8 @@ def optimise_model(
             pd.Series(model.effective_load.extract_values()).values
         if model.has_capacity_load_component:
             result_scalar["peak_load"] = model.peak_load.value
+        else:
+            result_scalar["peak_load"] = result_ts['effective_load'].max()
         # PV
         if model.has_pv:
             result_ts['effective_feedin'] = \
@@ -363,7 +365,9 @@ def optimise_model(
             result_ts["pv_feedin"] = pd.Series(model.pv.extract_values()).values
             if model.has_capacity_feedin_component:
                 result_scalar["peak_feedin"] = model.peak_feedin.value
-        # BESS
+            else:
+                result_scalar["peak_feedin"] = result_ts["pv_feedin"].max()
+                # BESS
         if model.has_bess:
             result_ts["charging_bess"] = \
                 pd.Series(model.charging_bess.extract_values()).values
