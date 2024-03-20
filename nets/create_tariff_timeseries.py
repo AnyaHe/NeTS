@@ -8,9 +8,11 @@ res_dir = r"H:\Tariffs\Timeseries"
 group_dir = r"H:\Tariffs\Consumer_Groups"
 prices_dir = \
     r"C:\Users\aheider\Documents\Software\project_Ade\IndustrialDSMFinland\prices.csv"
-check_existence = True
+check_existence = False
+save_results = True
 
 # import timeseries of components
+print(f"Starting creation of time series data.")
 base_components = {
     "Inflexible": ["loads_active_power"],
     "Heat_Pumps": ["heat_pumps", "heat_demand", "cop"],
@@ -45,12 +47,15 @@ kwargs = {
     "hp_p_nom_el": data["heat_pumps"]["p_set"],
     "hp_capacity_tes": data["heat_pumps"]["tes_capacity"],
     "hp_fixed_soc_tes": pd.Series(index=data["heat_pumps"].index, data=0.5),
+    "hp_heat_demand": data["heat_demand"],
+    "hp_cop": data["cop"],
     "gen_ts": data["generators_active_power"],
     "bess_capacity": data["storage_units"].capacity,
     "bess_ratio_power_to_energy":
         data["storage_units"].p_nom/data["storage_units"].capacity,
     "bess_fixed_soc": pd.Series(index=data["storage_units"].index, data=0.5)
 }
+print(f"Finished data import.")
 
 # create consumer groups
 consumer_groups = ["HH", "EV", "HP", "PV", "EV_HP", "EV_PV", "HP_PV", "PV_BESS",
@@ -70,9 +75,11 @@ for consumer_group in consumer_groups:
         res_dir_tmp = os.path.join(res_dir, consumer_group, tariff)
         os.makedirs(res_dir_tmp, exist_ok=True)
         if check_existence:
-            if os.path.isfile(os.path.join(res_dir, tariff, "hp_ts.csv")):
-                print(f"{tariff} already solved. Skipping.")
+            if os.path.isfile(os.path.join(res_dir_tmp, "timeseries.csv")):
+                print(f"{tariff} for consumer group {consumer_group} already solved. "
+                      f"Skipping.")
                 continue
+        print(f"Solving {tariff} for consumer group {consumer_group}.")
         results_ts, results_scalar_tmp = run_model_multiple_households(
             load_ts=data["loads_active_power"],
             add_ev=has_ev,
@@ -85,5 +92,7 @@ for consumer_group in consumer_groups:
         results_ts_tmp = data["loads_active_power"].copy()
         for _, ts_res in results_ts.items():
             results_ts_tmp += ts_res
-        results_scalar_tmp.to_csv(os.path.join(res_dir_tmp, f"timeseries.csv"))
-        results_scalar_tmp.to_csv(os.path.join(res_dir_tmp, f"scalars.csv"))
+        if save_results:
+            results_ts_tmp.to_csv(os.path.join(res_dir_tmp, f"timeseries.csv"))
+            results_scalar_tmp.to_csv(os.path.join(res_dir_tmp, f"scalars.csv"))
+        print(f"Finished {tariff} for consumer group {consumer_group}.")
