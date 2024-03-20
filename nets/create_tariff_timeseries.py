@@ -82,4 +82,8 @@ for consumer_group in consumer_groups:
             feedin_tariff=62.4,
             **kwargs, **tariff_data
         )
+        results_ts_tmp = data["loads_active_power"].copy()
+        for _, ts_res in results_ts.items():
+            results_ts_tmp += ts_res
+        results_scalar_tmp.to_csv(os.path.join(res_dir_tmp, f"timeseries.csv"))
         results_scalar_tmp.to_csv(os.path.join(res_dir_tmp, f"scalars.csv"))

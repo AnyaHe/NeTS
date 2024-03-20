@@ -6,11 +6,11 @@ def tariff_scenarios(
         dir_time_varying_suppliers_costs: str,
         mean_suppliers_costs: float = 79.3,
         energy_component: float = 78.0,
-        reduction_capacity: float = 4.3,
+        reduction_capacity: float = 39,
         energy_component_day: float = 90.0,
         energy_component_night: float = 50.0,
-        capacity_load_component: float = 384.6*52,
-        capacity_feedin_component: float = 96.2*52,
+        capacity_load_component: float = 115000,
+        capacity_feedin_component: float = 11500,
 ):
     # set up day night tariff
     day_night = pd.Series(index=timesteps, data=energy_component_day)
