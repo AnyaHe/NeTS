@@ -246,7 +246,7 @@ def add_network_tariff_model(model: pm.ConcreteModel,
     def peak_feedin(m, t):
         return m.peak_feedin >= m.effective_feedin[t]
     # set network tariff price components
-    if type(energy_component) is float:
+    if (type(energy_component) is float) or (type(energy_component) is int):
         energy_component = pd.Series(index=suppliers_costs.index, data=energy_component)
     model.has_energy_component = (energy_component > 0).any()
     if model.has_energy_component:
